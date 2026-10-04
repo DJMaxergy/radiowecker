@@ -6,9 +6,6 @@
 #include <esp_random.h>
 #endif
 
-class AudioGenerator;
-extern AudioGenerator *decoder;
-
 extern "C" const lv_font_t lv_font_latin_supp_14;
 extern "C" const lv_font_t lv_font_latin_supp_14_for_m18;
 
@@ -40,8 +37,10 @@ AlarmEdit alarmConfig;
 
 UiStartColors ui_start_cols;
 
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
-XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
+// TFT_eSPI benötigt keine Pins im Konstruktor, da diese in der User_Setup.h definiert sind
+TFT_eSPI tft = TFT_eSPI(); 
+
+XPT2046_Bitbang touch(TOUCH_MOSI, TOUCH_MISO, TOUCH_CLK, TOUCH_CS);
 
 /* Partialspeicher: 11 Zeilen statt 14 spart ~2 KiB .bss (ESP32 DRAM-Grenze) */
 static lv_color_t buf1[320 * 7];
@@ -220,22 +219,18 @@ static void ui_refresh_footer_icons(void) {
   ui_refresh_footer_icons_impl(false);
 }
 
-/* Touch: bei falscher Zuordnung nacheinander probieren: TS_SWAP_XY, TS_INVERT_X/Y */
-#ifndef TS_CAL_MIN
-#define TS_CAL_MIN 200
-#endif
-#ifndef TS_CAL_MAX
-#define TS_CAL_MAX 3900
-#endif
-#ifndef TS_SWAP_XY
-#define TS_SWAP_XY 0
-#endif
-#ifndef TS_INVERT_X
-#define TS_INVERT_X 0
-#endif
-#ifndef TS_INVERT_Y
-#define TS_INVERT_Y 0
-#endif
+/* Touch-Kalibrierung für XPT2046_Bitbang auf dem ESP32-2432S028 im Querformat */
+#undef TS_CAL_MIN
+#undef TS_CAL_MAX
+#undef TS_SWAP_XY
+#undef TS_INVERT_X
+#undef TS_INVERT_Y
+
+#define TS_CAL_MIN 300     // Typischer Mindestwert der Bitbang-Library
+#define TS_CAL_MAX 3800    // Typischer Maximalwert der Bitbang-Library
+#define TS_SWAP_XY 0       // X und Y müssen beim CYD nicht getauscht werden
+#define TS_INVERT_X 0      // X-Achse
+#define TS_INVERT_Y 0      // Y-Achse
 
 static lv_coord_t ts_last_x;
 static lv_coord_t ts_last_y;
@@ -272,7 +267,10 @@ static lv_color_t rgb565_to_lv(uint16_t c) {
 static void disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   uint32_t w = (uint32_t)(area->x2 - area->x1 + 1);
   uint32_t h = (uint32_t)(area->y2 - area->y1 + 1);
-  tft.drawRGBBitmap(area->x1, area->y1, (uint16_t *)px_map, (int16_t)w, (int16_t)h);
+  
+  // TFT_eSPI optimierte Funktion zum Zeichnen des LVGL-Puffers
+  tft.pushImage(area->x1, area->y1, w, h, (uint16_t *)px_map);
+  
   lv_display_flush_ready(disp);
 }
 
@@ -282,10 +280,16 @@ static uint32_t lvgl_tick_get_cb(void) {
 
 static void touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
   (void)indev;
-  if (touch.touched()) {
-    TS_Point p = touch.getPoint();
+  
+  // Holt den aktuellen Touch-Punkt (enthält xRaw, yRaw und zRaw)
+  TouchPoint p = touch.getTouch();
+
+  // Wenn zRaw > 0 ist, wird der Bildschirm aktiv berührt
+  if (p.zRaw > 0) {
     lv_coord_t x, y;
-    ts_map(p.x, p.y, &x, &y);
+    // Wir übergeben die rohen X- und Y-Werte an deine Mapping-Funktion
+    ts_map(p.xRaw, p.yRaw, &x, &y);
+    
     ts_last_x = x;
     ts_last_y = y;
     data->state = LV_INDEV_STATE_PRESSED;
@@ -1775,35 +1779,35 @@ static void ui_refresh_header(void) {
 }
 
 static void ui_start_colors_fill_factory(UiStartColors *d) {
-  d->bg = ILI9341_BLACK;
-  d->ip = ILI9341_ORANGE;
-  d->sleep_sym = ILI9341_ORANGE;
-  d->alarm_sym = ILI9341_ORANGE;
-  d->slider = ILI9341_ORANGE;
-  d->slider_bg = ILI9341_BLACK;
-  d->slider_border = ILI9341_RED;
-  d->date = ILI9341_ORANGE;
-  d->time_c = ILI9341_ORANGE;
-  d->box_bg = ILI9341_BLACK;
-  d->box_border = ILI9341_WHITE;
-  d->station_name = ILI9341_YELLOW;
-  d->station_title = ILI9341_WHITE;
+  d->bg = TFT_BLACK;
+  d->ip = TFT_ORANGE;
+  d->sleep_sym = TFT_ORANGE;
+  d->alarm_sym = TFT_ORANGE;
+  d->slider = TFT_ORANGE;
+  d->slider_bg = TFT_BLACK;
+  d->slider_border = TFT_RED;
+  d->date = TFT_ORANGE;
+  d->time_c = TFT_ORANGE;
+  d->box_bg = TFT_BLACK;
+  d->box_border = TFT_WHITE;
+  d->station_name = TFT_YELLOW;
+  d->station_title = TFT_WHITE;
 }
 
 void ui_start_colors_load_from_prefs(void) {
-  ui_start_cols.bg = pref.getUShort("usc_bg", ILI9341_BLACK);
-  ui_start_cols.ip = pref.getUShort("usc_ip", ILI9341_ORANGE);
-  ui_start_cols.sleep_sym = pref.getUShort("usc_sleep", ILI9341_ORANGE);
-  ui_start_cols.alarm_sym = pref.getUShort("usc_alarm", ILI9341_ORANGE);
-  ui_start_cols.slider = pref.getUShort("usc_sli", ILI9341_ORANGE);
-  ui_start_cols.slider_bg = pref.getUShort("usc_slibg", ILI9341_BLACK);
-  ui_start_cols.slider_border = pref.getUShort("usc_slibd", ILI9341_RED);
-  ui_start_cols.date = pref.getUShort("usc_date", ILI9341_ORANGE);
-  ui_start_cols.time_c = pref.getUShort("usc_time", ILI9341_ORANGE);
-  ui_start_cols.box_bg = pref.getUShort("usc_boxbg", ILI9341_BLACK);
-  ui_start_cols.box_border = pref.getUShort("usc_boxbd", ILI9341_WHITE);
-  ui_start_cols.station_name = pref.getUShort("usc_stnm", ILI9341_YELLOW);
-  ui_start_cols.station_title = pref.getUShort("usc_sttl", ILI9341_WHITE);
+  ui_start_cols.bg = pref.getUShort("usc_bg", TFT_BLACK);
+  ui_start_cols.ip = pref.getUShort("usc_ip", TFT_ORANGE);
+  ui_start_cols.sleep_sym = pref.getUShort("usc_sleep", TFT_ORANGE);
+  ui_start_cols.alarm_sym = pref.getUShort("usc_alarm", TFT_ORANGE);
+  ui_start_cols.slider = pref.getUShort("usc_sli", TFT_ORANGE);
+  ui_start_cols.slider_bg = pref.getUShort("usc_slibg", TFT_BLACK);
+  ui_start_cols.slider_border = pref.getUShort("usc_slibd", TFT_RED);
+  ui_start_cols.date = pref.getUShort("usc_date", TFT_ORANGE);
+  ui_start_cols.time_c = pref.getUShort("usc_time", TFT_ORANGE);
+  ui_start_cols.box_bg = pref.getUShort("usc_boxbg", TFT_BLACK);
+  ui_start_cols.box_border = pref.getUShort("usc_boxbd", TFT_WHITE);
+  ui_start_cols.station_name = pref.getUShort("usc_stnm", TFT_YELLOW);
+  ui_start_cols.station_title = pref.getUShort("usc_sttl", TFT_WHITE);
 }
 
 static void ui_start_colors_save_to_prefs_internal(void) {
@@ -1888,15 +1892,23 @@ void touch_loop(void) {
 }
 
 void setup_display(void) {
-  pinMode(TFT_LED, OUTPUT);
-  pinMode(LDR, INPUT);
+  // Pin-Konfiguration für Hintergrundbeleuchtung und Helligkeitssensor (LDR)
+  pinMode(TFT_LED, OUTPUT); // TFT_LED / Backlight beim CYD ist fest auf GPIO 21
+  pinMode(LDR, INPUT);  // LDR (Lichtsensor) beim CYD ist fest auf GPIO 34
+
+  digitalWrite(TFT_LED, HIGH); 
+  
   lastldr = analogRead(LDR);
-  setBGLight(100);
+  // setBGLight(100); // Schaltet das Display-Licht über das Projekt ein
 
-  tft.begin();
-  tft.setRotation(3);
-  tft.fillScreen(ILI9341_BLACK);
+  // TFT_eSPI Initialisierung
+  tft.init();          // Statt tft.begin()
+  tft.setRotation(1);  // Querformat (Falls verkehrt herum, auf 3 ändern)
+  tft.invertDisplay(true); // Korrigiert den Hintergrund (Weiß -> Schwarz)
+  tft.setSwapBytes(true);  // NEU: Tauscht High- und Low-Byte (Korrigiert Farbkanäle)
+  tft.fillScreen(TFT_BLACK);
 
+  // XPT2046_Bitbang Touch-Initialisierung
   touch.begin();
 
 #if defined(ARDUINO_ARCH_ESP32)
@@ -1917,10 +1929,12 @@ void setup_display(void) {
   font_radio_meta = lv_font_montserrat_18;
   font_radio_meta.fallback = &lv_font_latin_supp_14;
 
+  // LVGL Display-Treiber anbinden (320x240 Pixel)
   lv_disp_main = lv_display_create(320, 240);
   lv_display_set_flush_cb(lv_disp_main, disp_flush);
   lv_display_set_buffers(lv_disp_main, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
+  // LVGL Touch-Eingabe registrieren
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touch_read);
@@ -1934,7 +1948,6 @@ void setup_display(void) {
   ui_start_colors_load_from_prefs();
   build_clock_screen();
   yield();
-  /* scr_radio / scr_config / scr_alarm: bei Bedarf + teardown beim Verlassen → weniger dauerhafter Heap */
 
   ui_sync_all_gain_sliders();
   cfg_sync_value_labels();
@@ -2168,14 +2181,25 @@ void setBGLight(uint8_t prct) {
   static unsigned long prevLdrMs = 0;
   static bool lastWasManualBright = true;
   static uint16_t ldrSmoothLogical = LDR_LED_PWM_MIN;
+  
   if (prct == 0) {
     bool enteringLdr = lastWasManualBright;
     if (!enteringLdr && (millis() - prevLdrMs < 10000UL)) return;
     prevLdrMs = millis();
     lastWasManualBright = false;
 
-    uint16_t raw = (uint16_t)analogRead(LDR);
-    uint16_t target = (uint16_t)((uint32_t)raw * 255U / 4096U);
+    // 1. Rohen LDR-Wert vom CY-Display einlesen
+    uint16_t raw = (uint16_t)analogRead(LDR); 
+    
+    // 2. HARDWARE-KORREKTUR FÜR DAS CYD:
+    // Der LDR liefert bei Dunkelheit hohe Werte (~4095) und bei Helligkeit niedrige Werte (~0).
+    // Wir spiegeln den Wert hier (4095 - raw), damit viel Licht auch einen großen Zielwert ergibt!
+    if (raw > 4095) raw = 4095;
+    uint16_t inverted_raw = 4095 - raw;
+
+    // 3. Auf den 8-Bit-Bereich (0-255) für das Backlight herunterskalieren
+    uint16_t target = (uint16_t)((uint32_t)inverted_raw * 255U / 4096U);
+    
     if (target < LDR_LED_PWM_MIN) target = LDR_LED_PWM_MIN;
     if (target > 255) target = 255;
 
@@ -2193,13 +2217,27 @@ void setBGLight(uint8_t prct) {
     lastWasManualBright = true;
     ledb = (uint16_t)(255 * prct / 100);
   }
+  
   if (ledb > 255) ledb = 255;
   /* Mindest-PWM bei fester Prozent-Helligkeit; LDR-Minimum siehe LDR_LED_PWM_MIN in 00_pin_settings.h */
   if (prct != 0 && ledb < 3) ledb = 3;
+
+  // Active-HIGH Hinweis: Da das CYD-Backlight bei 255 am hellsten ist, 
+  // lassen wir die alte "255 - ledb" Invertierung hier komplett weg!
   if (LED_ON == 0) ledb = (uint16_t)(255 - ledb);
+
   if (ledb != lastLedb) {
     RADIO_SERIAL(Serial.printf("percent = %i LED = %i\n", prct, ledb));
-    analogWrite(TFT_LED, ledb);
+    
+    // Sicherer, timer-unabhängiger LEDC-Kanal für den ESP32-Core v2.x
+    static bool ledc_setup_done = false;
+    if (!ledc_setup_done) {
+      ledcSetup(7, 5000, 8);  // Kanal 7, 5kHz Frequenz, 8-Bit Auflösung
+      ledcAttachPin(21, 7);   // Bindet den Backlight-Pin 21 fest an Kanal 7
+      ledc_setup_done = true;
+    }
+    
+    ledcWrite(7, ledb);       // Schreibt den korrigierten Helligkeitswert
     lastLedb = ledb;
   }
 }
@@ -2218,7 +2256,7 @@ void toggleRadio(boolean off, boolean keepAlarmSnoozePending, boolean useAlarmGa
       alarmActionsVisible = false;
     }
     radio = false;
-    setGain(curGain);
+    //setGain(curGain);
   } else {
     if (connected) {
       if (startUrl(stationlist[actStation].url, useAlarmGainWhenStarting)) {
@@ -2521,7 +2559,7 @@ void DrawFooterButtons_Power_Sleep_Alarm(void) {
   ui_refresh_footer_icons();
 }
 
-void onTouchClick(TS_Point p) {
+void onTouchClick(TouchPoint p) {
   (void)p;
 }
 

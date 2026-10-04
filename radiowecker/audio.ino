@@ -3,189 +3,54 @@ bool startUrl(const char *url, bool useAlarmGain = false);
 
 #include <math.h>
 
-/* Stream-/Codec per malloc beim ersten startUrl — nicht in setup nach LVGL (sonst ~100 KiB Heap → LwIP/Wetter). */
-const int preallocateBufferSize = 40 * 1024;
-const int preallocateCodecSize = 29192;  // MP3-Decoder (ESP8266Audio)
-static_assert(preallocateCodecSize >= AudioGeneratorMP3::preAllocSize(),
-              "preallocateCodecSize < AudioGeneratorMP3::preAllocSize()");
-
-void *preallocateBuffer = NULL;
-void *preallocateCodec = NULL;
-
-// Instanzen für Audio-Komponenten
-AudioGenerator *decoder = NULL;         // MP3-Decoder
-AudioFileSourceICYStream *file = NULL;  // Eingabemodul für ICY-Streams aus dem Web
-AudioFileSourceBuffer *buff = NULL;     // Puffer für den Eingabestream
-AudioOutputI2S *out = NULL;  // Ausgabemodul I2S
-
-// Stream-/Codec-Puffer erst bei erster Wiedergabe (startUrl) — spart ~70 KiB Heap für WiFi/WebServer
-// (WebServer::begin nutzt new; bei Heap-Fragmentierung/OOM: StoreProhibited an 0x0).
-static int s_effective_buffer_size = preallocateBufferSize;
-
-static bool ensure_audio_prealloc(void) {
-  if (preallocateBuffer && preallocateCodec) return true;
-
-  auto try_alloc = [&](int stream_sz) -> bool {
-    if (preallocateBuffer) {
-      free(preallocateBuffer);
-      preallocateBuffer = NULL;
-    }
-    if (preallocateCodec) {
-      free(preallocateCodec);
-      preallocateCodec = NULL;
-    }
-    s_effective_buffer_size = stream_sz;
-    preallocateBuffer = malloc((size_t)stream_sz);
-    preallocateCodec = malloc((size_t)preallocateCodecSize);
-    if (preallocateBuffer && preallocateCodec) return true;
-    if (preallocateBuffer) {
-      free(preallocateBuffer);
-      preallocateBuffer = NULL;
-    }
-    if (preallocateCodec) {
-      free(preallocateCodec);
-      preallocateCodec = NULL;
-    }
-    return false;
-  };
-
-  /* Kleinste zuerst: ICY open() braucht danach noch ~tens of KB für Socket/TCP — bei 32+29 KiB Puffer
-   * war nur noch ~43 KiB frei → open() scheitert trotzdem. */
-  static const int kStreamTry[] = {
-    12 * 1024, 16 * 1024, 24 * 1024, 32 * 1024, preallocateBufferSize,
-  };
-  for (size_t i = 0; i < sizeof(kStreamTry) / sizeof(kStreamTry[0]); i++) {
-    if (try_alloc(kStreamTry[i])) {
-      if (kStreamTry[i] < preallocateBufferSize) {
-        RADIO_SERIAL(Serial.printf_P(PSTR("Audio: Stream-Puffer %d B (kleiner = mehr Heap für TCP)\n"), kStreamTry[i]));
-      }
-      return true;
-    }
-  }
-  RADIO_SERIAL(Serial.printf_P(PSTR("WARNING: Audio-Puffer malloc fehlgeschlagen. freeHeap=%u\n"), (unsigned)ESP.getFreeHeap()));
-  return false;
-}
-
-/* ESP32 + ESP8266Audio ≥2.4: AudioOutputI2S::begin() ruft immer i2s_new_channel() — es gibt kein
- * „bereits an“. AudioGeneratorMP3::begin() ruft danach selbst output->begin(). Darf also nur einmal
- * vor dem Decoder passieren: nach decoder->stop() nur Kanal freigeben, kein begin() hier. */
-static void audio_i2s_release_after_pipeline_stop(void) {
-  if (!out) return;
-#if defined(ESP32)
-  out->stop();
-#endif
-}
-
-#if !defined(ESP32)
-static bool audio_ensure_i2s_on_esp8266_style(void) {
-  if (!out) return false;
-  out->SetChannels(2);
-  out->SetRate(44100);
-  if (!out->begin()) {
-    RADIO_SERIAL(Serial.println(F("Audio: I2S begin fehlgeschlagen (DMA/Heap?)")));
-    return false;
-  }
-  return true;
-}
-#endif
+// Aktiviert den internen DAC und nutzt Kanal 2 (GPIO26) für den CYD-Lautsprecher
+Audio audio(true);
 
 // Funktion für die gesamte erforderliche Einrichtung
 void setup_audio() {
-  out = new AudioOutputI2S(0, AudioOutputI2S::EXTERNAL_I2S, 4, AudioOutputI2S::APLL_DISABLE);
-  out->SetPinout(BCLK, LRCLK, DOUT);
-  out->SetOutputModeMono(true);
-#if defined(ESP32)
-  /* I2S erst bei decoder->begin() — sonst doppeltes begin() beim ersten startUrl (Assert). */
-#else
-  out->SetChannels(2);
-  out->SetRate(44100);
-  if (!out->begin()) {
-    RADIO_SERIAL(Serial.println(F("Audio: I2S begin fehlgeschlagen (DMA/Heap?)")));
-  }
-#endif
+  pinMode(AMP_SHUTDOWN, OUTPUT);
+  digitalWrite(AMP_SHUTDOWN, HIGH);
+  // Für den internen DAC des CYD-Boards werden keine extra Pinouts benötigt.
+  audio.forceMono(true);
+  // Standard-Startlautstärke setzen (Wertebereich bei schreibfaul1 ist 0 bis 21)
+  audio.setVolume(12); 
 }
 
-/* Mehrere decoder->loop()-Aufrufe pro loop()-Durchlauf: sonst verhungert die Pipeline
- * hinter WebServer + LVGL (Ruckler). 16 ≈ Kompromiss WDT vs. Durchsatz. */
-#ifndef AUDIO_LOOPS_PER_FRAME
-#define AUDIO_LOOPS_PER_FRAME 16
-#endif
+// Startet den lauten MP3-Wecksound von der Micro-SD-Karte
+void alarm_beep_start(void) {
+  stopPlaying(); // Beendet ein eventuell laufendes Radio sauber
 
-/* ESP8266Audio: loop() kann false liefern, während isRunning() noch true ist (Input(): kein Byte
- * vom Stream → MAD_FLOW_STOP). Sofortiger Reconnect zerstört einen sonst gesunden Stream. */
-#ifndef AUDIO_SOFT_FAIL_MAX
-#define AUDIO_SOFT_FAIL_MAX 500
-#endif
-static uint16_t s_audio_soft_fail_streak = 0;
-
-static void audio_recover_or_stop(void) {
-  stopPlaying();
-  if (radio && connected && !alarmBeepActive && actStation < STATIONS) {
-    RADIO_SERIAL(Serial.printf_P(PSTR("Stream unterbrochen — Reconnect %s\n"), stationlist[actStation].name));
-    if (startUrl(stationlist[actStation].url, alarmActionsVisible && radio)) {
-      DrawFooterButtons_Power_Sleep_Alarm();
-      return;
-    }
+  // 1. Prüfen, ob die SD-Karte einsatzbereit ist
+  if (SD.cardSize() == 0) {
+    RADIO_SERIAL(Serial.println("Alarm abgebrochen: Keine SD-Karte im Slot!"));
+    return;
   }
-  radio = false;
-  RADIO_SERIAL(Serial.println(F("Stream beendet / Reconnect fehlgeschlagen (Radio aus).")));
-  DrawFooterButtons_Power_Sleep_Alarm();
-}
 
-#if defined(ESP32)
-/* Piep-Wecker: Rechteck/Sinus ca. 880 Hz, 200 ms an / 300 ms aus, Lautstärke ~alarmGain */
-static void alarm_beep_pump(void) {
-  if (!out || !alarmBeepActive) return;
-  static float ph = 0.f;
-  const float dph = 2.f * 3.14159265f * 880.f / 44100.f;
-  /* Volle Amplitude wie Stream-Samples; Lautstärke nur über setGain(alarmGain) (wie Radio-Wecker) */
-  const float ampf = 30000.f;
-  uint32_t c = millis() % 500u;
-  bool on = (c < 200u);
-  for (int n = 0; n < 128; n++) {
-    int16_t v = 0;
-    if (on) {
-      v = (int16_t)(sinf(ph) * ampf);
-      ph += dph;
-      if (ph > 6.28318f) ph -= 6.28318f;
-    }
-    int16_t st[2] = {v, v};
-    if (!out->ConsumeSample(st)) break;
+  // 2. Den Onboard-Verstärker aufwecken (Active-LOW -> LOW zum Einschalten)
+  digitalWrite(AMP_SHUTDOWN, LOW);
+  delay(10); 
+
+  // 3. Wecklautstärke (alarmGain) auf die Audio-Pipeline anwenden
+  setGain((float)alarmGain); 
+
+  // 4. KORREKTUR: Lädt und spielt die MP3-Datei direkt von der SD-Karte
+  bool success = audio.connecttoFS(SD, "/alarm.mp3"); 
+  
+  if (success) {
+    alarmBeepActive = true; 
+    audio.setBalance(1); // Sound fest auf GPIO 26 zwingen (DAC2)
+    RADIO_SERIAL(Serial.println("SD-MP3-Wecker gestartet!"));
+  } else {
+    RADIO_SERIAL(Serial.println("alarm.mp3 wurde auf der SD-Karte nicht gefunden!"));
   }
 }
-#endif
 
 // Diese Funktion überprüft, ob der Decoder läuft
 void audio_loop() {
-#if defined(ESP32)
-  if (alarmBeepActive && out) {
-    alarm_beep_pump();
-    return;
-  }
-#endif
-  if (!decoder) return;
-
-  if (!decoder->isRunning()) {
-    s_audio_soft_fail_streak = 0;
-    audio_recover_or_stop();
-    return;
-  }
-
-  for (int i = 0; i < AUDIO_LOOPS_PER_FRAME && decoder && decoder->isRunning(); i++) {
-    if (!decoder->loop()) {
-      if (!decoder->isRunning()) {
-        s_audio_soft_fail_streak = 0;
-        audio_recover_or_stop();
-        return;
-      }
-      if (++s_audio_soft_fail_streak >= AUDIO_SOFT_FAIL_MAX) {
-        s_audio_soft_fail_streak = 0;
-        audio_recover_or_stop();
-        return;
-      }
-      break;
-    }
-    s_audio_soft_fail_streak = 0;
+  // Wenn die Bibliothek meldet, dass sie im Hintergrund Daten empfängt/decodiert,
+  // führen wir die Schleife aus, völlig unabhängig von den Variablen des Haupt-Tabs!
+  if (audio.isRunning()) {
+    audio.loop();
   }
 }
 
@@ -233,185 +98,112 @@ static void metadata_latin1_to_utf8(const char *in, char *out, size_t outsz) {
   out[o] = 0;
 }
 
-/*
- * ICY/Shoutcast-Metadaten (StreamTitle):
- * - Viele Sender schicken nichts oder nur alle 10–60 s (Header icy-metaint).
- * - Kodierung: oft UTF-8, sonst ISO-8859-1; russische Sender manchmal Windows-1251 —
- *   dann schlägt utf8_ok fehl und der Latin-1-Fallback liefert falsche Zeichen (kein Kyrillisch).
- * - Leerer StreamTitle (len=0): ICY liefert manchmal Padding/leere Blöcke — wird ignoriert, Titel bleibt.
- * Diagnose: RADIO_DEBUG_SERIAL=1 in 00_settings.h, seriell 115200 Baud.
- * Extern: ffplay -loglevel debug URL oder Stream im Browser (Entwicklertools → Netzwerk).
- */
-#if RADIO_DEBUG_SERIAL
-static void radio_debug_icy_raw(const char *s, size_t maxshow) {
-  Serial.print(F("ICY raw hex: "));
-  const unsigned char *p = (const unsigned char *)s;
-  for (size_t i = 0; i < maxshow && p[i]; i++) {
-    Serial.printf("%02x ", (unsigned)p[i]);
-  }
-  Serial.println();
-}
-#endif
+// Wird von schreibfaul1 automatisch aufgerufen, wenn ein neuer Songtitel empfangen wird
+void audio_showstreamtitle(const char *info) {
+  // CRASH-SCHUTZ: Wenn das Radio im Standby ist
+  if (!audio.isRunning()) return;
 
-// Callback-Funktion, die aufgerufen wird, wenn Metadaten im Eingabestream gefunden werden
-void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string) {
-  (void)cbData;
-  if (type == nullptr || string == nullptr) {
-    RADIO_SERIAL(Serial.println("Error: Null pointer encountered in MDCallback."));
-    return;
-  }
+  if (info && *info) {
+    char utf8_buf[128]; // Puffer für die Textkonvertierung
 
-  char s1[32];
-  /* Genug Platz für lange StreamTitle-Zeilen; zu kurz → abgeschnittener UTF-8 → utf8_ok=0. */
-  char s2[384];
-  strlcpy(s1, type, sizeof(s1));
-  strlcpy(s2, string, sizeof(s2));
-
-  if (strstr(s1, "Title") != nullptr) {
-    if (s2[0] == '\0') {
-#if RADIO_DEBUG_SERIAL
-      Serial.println(F("ICY StreamTitle leer (len=0) — Titel unverändert, utf8_ok=1 nur trivial"));
-#endif
-      return;
-    }
-#if RADIO_DEBUG_SERIAL
-    radio_debug_icy_raw(s2, 48);
-    Serial.printf("ICY StreamTitle type='%s' isUnicode=%d len=%u utf8_ok=%d path=%s\n", s1, isUnicode ? 1 : 0,
-                  (unsigned)strlen(s2), metadata_is_valid_utf8(s2) ? 1 : 0,
-                  isUnicode ? "unicode" : (metadata_is_valid_utf8(s2) ? "utf8" : "latin1"));
-#endif
-    if (isUnicode) {
-      strlcpy(title, s2, sizeof(title));
-    } else if (metadata_is_valid_utf8(s2)) {
-      strlcpy(title, s2, sizeof(title));
+    // Prüfen, ob der Sender sauberes UTF-8 schickt, andernfalls nach UTF-8 konvertieren
+    if (metadata_is_valid_utf8(info)) {
+      strncpy(utf8_buf, info, sizeof(utf8_buf) - 1);
+      utf8_buf[sizeof(utf8_buf) - 1] = '\0';
     } else {
-      metadata_latin1_to_utf8(s2, title, sizeof(title));
+      metadata_latin1_to_utf8(info, utf8_buf, sizeof(utf8_buf));
     }
-    RADIO_SERIAL(Serial.printf("Title: %s\n", title));
-    newTitle = true;
-  } else {
-    RADIO_SERIAL(Serial.printf("METADATA '%s' = '%s'\n", s1, s2));
+
+    // Direkt in die globalen Variablen des Radiowecker-Projekts schreiben
+    strncpy(title, utf8_buf, sizeof(title) - 1);
+    title[sizeof(title) - 1] = '\0';
+    
+    // WICHTIG: Das Projekt nutzt 'newTitle', um der Loop zu sagen, dass das Display aktualisiert werden muss
+    newTitle = true; 
+    
+    RADIO_SERIAL(Serial.printf("Metadata Title direkt: %s\n", title));
   }
 }
 
-// Stoppt das Abspielen des Eingabestreams, gibt den Speicher frei und löscht die Instanzen
+// Stoppt das Abspielen und räumt den Arbeitsspeicher auf
 void stopPlaying() {
   alarmBeepActive = false;
-  if (decoder) {
-    decoder->stop();  // Stoppt das Abspielen
-    delete decoder;   // Gibt den Decoder und seinen Speicher frei
-    decoder = NULL;   // Setzt den Zeiger auf NULL, um darauf hinzuweisen, dass der Speicher freigegeben wurde
-  }
 
-  if (buff) {
-    buff->close();  // Schließt den Puffer
-    delete buff;    // Gibt den Puffer und seinen Speicher frei
-    buff = NULL;    // Setzt den Zeiger auf NULL
-  }
+  // Schließt den Song und gibt alle internen Decoder- und Dateipuffer im RAM frei
+  audio.stopSong(); 
+  
+  yield(); // Speicherbereinigung im Hintergrund abwarten
 
-  if (file) {       // Und schließlich für den Stream
-    file->close();  // Schließt den Stream
-    delete file;    // Gibt den Stream und seinen Speicher frei
-    file = NULL;    // Setzt den Zeiger auf NULL
-  }
-
-#if defined(ESP32)
-  /* decoder->stop() hat output->stop() schon aufgerufen — hier nur sicherstellen, falls kein Decoder lief. */
-  audio_i2s_release_after_pipeline_stop();
-#else
-  /* ESP8266: begin() ist idempotent wenn i2sOn; nach stop() Kanal wieder an für nächsten Stream. */
-  audio_ensure_i2s_on_esp8266_style();
-#endif
+  // Verstärker-Chip komplett stumm schalten gegen das Standby-Rauschen
+  digitalWrite(AMP_SHUTDOWN, HIGH);
+  
+  RADIO_SERIAL(Serial.printf("Audio gestoppt. Freier Heap danach: %u Bytes\n", (unsigned)ESP.getFreeHeap()));
 }
 
 // Startet das Abspielen eines Streams von der angegebenen Station (URL aus stationlist[].url o. Ä.)
 bool startUrl(const char *url, bool useAlarmGain) {
-  stopPlaying();  // Zuerst bestehende Streams schließen
+  stopPlaying();  // Zuerst bestehende Streams und Beeps schließen
 
   if (!url || !*url) {
     RADIO_SERIAL(Serial.println(F("startUrl: leere URL")));
     return false;
   }
 
-  if (!out || !ensure_audio_prealloc()) {
-    RADIO_SERIAL(Serial.println(F("startUrl: kein I2S oder Audio-Puffer-Allokation fehlgeschlagen")));
-    return false;
-  }
-
-  RADIO_SERIAL(Serial.printf_P(PSTR("startUrl: heap=%u vor open\n"), (unsigned)ESP.getFreeHeap()));
+  RADIO_SERIAL(Serial.printf("Active station %s\n", url));
   yield();
 
-  RADIO_SERIAL(Serial.printf("Active station %s\n", url));
-  file = new AudioFileSourceICYStream();
-  if (!file->open(url)) {
-    RADIO_SERIAL(Serial.printf_P(PSTR("startUrl: open fehlgeschlagen heap=%u\n"), (unsigned)ESP.getFreeHeap()));
-    delete file;
-    file = NULL;
+  // Startet den Webstream. schreibfaul1 übernimmt ICY-Stream, Pufferung und MP3-Decoder automatisch.
+  bool success = audio.connecttohost(url);
+
+  if (!success) {
+    RADIO_SERIAL(Serial.println(F("startUrl: connecttohost fehlgeschlagen")));
     return false;
   }
 
-  file->RegisterMetadataCB(MDCallback, NULL);
+  digitalWrite(AMP_SHUTDOWN, LOW);
 
-  buff = new AudioFileSourceBuffer(file, preallocateBuffer, s_effective_buffer_size);
-  RADIO_SERIAL(Serial.printf_P(PSTR("sourcebuffer created - Free mem=%d\n"), ESP.getFreeHeap()));
-
-  decoder = (AudioGenerator *)new AudioGeneratorMP3(preallocateCodec, preallocateCodecSize);
-  RADIO_SERIAL(Serial.printf_P(PSTR("created decoder\n")));
-  RADIO_SERIAL(Serial.printf_P(PSTR("Decoder start...\n")));
-  if (!decoder->begin(buff, out)) {
-    RADIO_SERIAL(Serial.printf_P(PSTR("MP3 decoder begin failed (codec %d B, need %d B, heap %u)\n"),
-                    preallocateCodecSize, (int)AudioGeneratorMP3::preAllocSize(), (unsigned)ESP.getFreeHeap()));
-    delete decoder;
-    decoder = NULL;
-    buff->close();
-    delete buff;
-    buff = NULL;
-    file->close();
-    delete file;
-    file = NULL;
-    return false;
-  }
-  {
-    unsigned long t0 = millis();
-    while (decoder && decoder->isRunning() && millis() - t0 < 250) {
-      decoder->loop();
-      yield();
-    }
-  }
+  // Lautstärke basierend auf dem Weck- oder Normalmodus setzen
   setGain(useAlarmGain ? alarmGain : curGain);
-  RADIO_SERIAL(Serial.printf_P(PSTR("MP3 ok running=%d\n"), decoder->isRunning() ? 1 : 0));
 
-  return decoder->isRunning();
+  RADIO_SERIAL(Serial.printf_P(PSTR("MP3 ok running=%d\n"), audio.isRunning() ? 1 : 0));
+  return success;
 }
 
 // Ändert die Lautstärke auf den aktuellen Gain-Wert
 void setGain(float gain) {
-  if (!out) return;
-  float g = gain / 100.0f;
-  if (g < 0.0f) g = 0.0f;
-  if (g > 1.0f) g = 1.0f;
-  /* Max. Verstärkung bei 100 % Slider: AUDIO_GAIN_MAX (0..4, typ. 0.35–0.5) */
-  float v = g * AUDIO_GAIN_MAX;
-  if (v > 4.0f) v = 4.0f;
-  out->SetGain(v);
-  RADIO_SERIAL(Serial.printf_P(PSTR("New volume = %4.2f\n"), v));
+  // Eingabewert begrenzen (Sicherheitshalber, falls Werte außerhalb von 0-100 kommen)
+  if (gain < 0.0f) gain = 0.0f;
+  if (gain > 100.0f) gain = 100.0f;
+
+  // Der Slider liefert 0 bis 100. schreibfaul1/ESP32-audioI2S benötigt eine Ganzzahl von 0 bis 21.
+  // Wir nutzen map() für die lineare Umrechnung:
+  int new_volume = map((int)gain, 0, 100, 0, AUDIO_GAIN_MAX);
+
+  // Lautstärke in der neuen Bibliothek setzen
+  audio.setVolume(new_volume);
+
+  RADIO_SERIAL(Serial.printf("New volume (Percent: %4.2f%%) -> Internal DAC Volume: %d\n", gain, new_volume));
 }
 
-/* Weckton Piep (ESP32: I2S ohne Stream). Sonst: Fallback wie Radio mit Wecklautstärke. */
-void alarm_beep_start(void) {
-#if !defined(ESP32)
-  stopPlaying();
-  if (connected && startUrl(stationlist[actStation].url, true)) radio = true;
-#else
-  stopPlaying();
-  if (!out) return;
-  out->SetChannels(2);
-  out->SetRate(44100);
-  if (!out->begin()) {
-    RADIO_SERIAL(Serial.println(F("alarm_beep_start: I2S begin failed")));
-    return;
+// Optional: Falls du auch den Sendernamen abfangen willst
+void audio_showstation(const char *info) {
+  // Hier könnte Code stehen, um den Sendernamen anzuzeigen
+}
+
+// Wird von der Bibliothek automatisch aufgerufen, wenn die MP3-Datei fertig abgespielt wurde
+void audio_eof_mp3(const char *info){
+  if (alarmBeepActive) {
+    RADIO_SERIAL(Serial.println("Wecksound beendet -> Speicher freigeben & Loop neu starten."));
+    
+    // WICHTIG GEGEN HEAP-FRAGMENTIERUNG: 
+    // Stoppt den alten Datei-Task sauber und gibt alle belegten RAM-Puffer restlos frei,
+    // bevor ein neuer Dateizeiger geöffnet wird!
+    audio.stopSong(); 
+    
+    yield(); // Dem ESP32-Betriebssystem eine Mikrosekunde Zeit geben, den Heap aufzuräumen
+
+    // Startet die MP3-Datei von der SD-Karte sicher von vorn
+    audio.connecttoFS(SD, "/alarm.mp3"); 
+    audio.setBalance(1);
   }
-  setGain((float)alarmGain);
-  alarmBeepActive = true;
-#endif
 }

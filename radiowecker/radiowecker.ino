@@ -11,8 +11,7 @@ extern "C" int esp_bt_controller_mem_release(int mode);
 #define ESP_BT_MODE_BTDM 3
 #endif
 #endif
-// Vor tft_display.ino (Arduino fügt die .ino alphabetisch danach ein)
-extern AudioGenerator *decoder;  // Definition in audio.ino
+
 void showStartPage(void);
 void toggleRadio(boolean off, boolean keepAlarmSnoozePending = false, boolean useAlarmGainWhenStarting = false);
 void alarm_beep_start(void);
@@ -25,7 +24,7 @@ static void poll_alarm_hw_buttons(void);
 static void alarm_hw_stop_button_action(void);
 void httpOtaRunDeferredBoot(void);
 // predefined function from modul tft_display.ino
-void displayMessage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const char* text, uint8_t align = ALIGNLEFT, boolean big = false, uint16_t fc = ILI9341_WHITE, uint16_t bg = ILI9341_BLACK, uint8_t lines = 1);
+void displayMessage(uint16_t x, uint16_t y, uint16_t w, uint16_t h, const char* text, uint8_t align = ALIGNLEFT, boolean big = false, uint16_t fc = TFT_WHITE, uint16_t bg = TFT_BLACK, uint8_t lines = 1);
 void setBGLight(uint8_t prct);
 boolean initWiFi(const char *wifiSsid, const char *wifiPkey);  /* wlan.ino — Hauptsketch steht vor alphabetischen .ino */
 void tft_i18n_refresh_labels(void);
@@ -169,28 +168,42 @@ void setup() {
   RADIO_SERIAL(Serial.printf_P(PSTR("heap vor setup_audio: %u\n"), (unsigned)ESP.getFreeHeap()));
 
   // Führe die Setup-Funktionen für Audio, Display und Senderliste aus
-  setup_audio();       // Initialisiere die Audio-Streams
-  RADIO_SERIAL(Serial.printf_P(PSTR("heap nach setup_audio: %u\n"), (unsigned)ESP.getFreeHeap()));
-  RADIO_SERIAL(Serial.println(F("setup_display…")));
   setup_display();     // Initialisiere die Display-Schnittstelle
   RADIO_SERIAL(Serial.printf_P(PSTR("heap nach setup_display: %u\n"), (unsigned)ESP.getFreeHeap()));
   RADIO_SERIAL(Serial.println(F("setup_display OK")));
+  
+  delay(100);
+
+  setup_audio();       // Initialisiere die Audio-Streams
+  RADIO_SERIAL(Serial.printf_P(PSTR("heap nach setup_audio: %u\n"), (unsigned)ESP.getFreeHeap()));
+  RADIO_SERIAL(Serial.println(F("setup_display…")));
+
+  // Init Alarm LED
+  pinMode(ALARM_LED, OUTPUT);
 
   /* HTTP-OTA: nach setup_display → gleicher OTA-Screen (Balken/Text) wie bei ArduinoOTA. */
   if (pref.getUChar(PREF_HTTP_OTA_PEND, 0) != 0) {
     httpOtaRunDeferredBoot();
   }
 
-  /* Audio-Puffer erst bei erstem startUrl: sonst ~70 KiB weniger Heap → LwIP/Wetter/TCP-Timeouts. */
+  /* Audio-Puffer-Kommentar korrigiert: schreibfaul1 verwaltet den Puffer dynamisch intern. */
   RADIO_SERIAL(Serial.printf_P(PSTR("heap vor setup_senderList: %u\n"), (unsigned)ESP.getFreeHeap()));
   setup_senderList();  // Lade die Senderliste aus den Präferenzen
   RADIO_SERIAL(Serial.printf_P(PSTR("heap nach setup_senderList: %u\n"), (unsigned)ESP.getFreeHeap()));
-  setGain(curGain);    // gespeicherte Lautstärke auf I2S (0 = dauerhaft stumm bis zum nächsten Slider-Zug)
+  setGain(curGain);    // gespeicherte Lautstärke auf den internen DAC setzen
+
+  // NEU: SD-Kartenslot des CYD-Boards initialisieren (Chip-Select liegt fest auf GPIO 5)
+  RADIO_SERIAL(Serial.println("Initialisiere SD-Karte..."));
+  if (!SD.begin(SD_CS, SPI, 55000000)) {
+    RADIO_SERIAL(Serial.println("SD-Karte konnte nicht gelesen werden (Fehlt oder falsches Dateisystem)!"));
+  } else {
+    RADIO_SERIAL(Serial.println("SD-Karte erfolgreich gemountet."));
+  }
 
   // Versuche, eine WLAN-Verbindung herzustellen und zeige den Fortschritt auf dem Display an
   displayClear();                                                                                          // Bildschirm löschen
-  displayMessage(5, 10, 310, 30, i18n_str(I18N_CONNECTING_TO), ALIGNCENTER, true, ILI9341_YELLOW, ILI9341_BLACK, 1);  // Zeige "Verbinden zu" auf dem Display an
-  displayMessage(5, 50, 310, 30, ssid, ALIGNCENTER, true, ILI9341_GREEN, ILI9341_BLACK, 1);  // SSID auf dem Display
+  displayMessage(5, 10, 310, 30, i18n_str(I18N_CONNECTING_TO), ALIGNCENTER, true, TFT_YELLOW, TFT_BLACK, 1);  // Zeige "Verbinden zu" auf dem Display an
+  displayMessage(5, 50, 310, 30, ssid, ALIGNCENTER, true, TFT_GREEN, TFT_BLACK, 1);  // SSID auf dem Display
   RADIO_SERIAL(Serial.println("Connect WiFi"));                                                                          // Debug-Ausgabe: "Verbinde zu WiFi"
 
   // Versuche, sich mit dem WLAN zu verbinden
@@ -215,11 +228,11 @@ void setup() {
   } else {  // Wenn die Verbindung nicht erfolgreich war
     // Es konnte keine Verbindung hergestellt werden. Eine entsprechende Nachricht wird auf dem Display angezeigt
     displayClear();                                                                                         // Bildschirm löschen
-    displayMessage(5, 10, 310, 30, i18n_str(I18N_NOT_CONNECTED), ALIGNCENTER, true, ILI9341_RED, ILI9341_BLACK, 1);    // Zeige "Nicht verbunden" auf dem Display an
-    displayMessage(5, 50, 310, 30, i18n_str(I18N_CONNECT_TO_AP), ALIGNCENTER, true, ILI9341_WHITE, ILI9341_BLACK, 1);  // Zeige "Verbinden zu AP" auf dem Display an
-    displayMessage(5, 100, 310, 30, AP_NAME, ALIGNCENTER, true, ILI9341_GREEN, ILI9341_BLACK, 1);           // Zeige "Ap Name" auf dem Display an
-    displayMessage(5, 150, 310, 30, i18n_str(I18N_CONFIG_IP), ALIGNCENTER, true, ILI9341_WHITE, ILI9341_BLACK, 1);     // Zeige "IP konfigurieren" auf dem Display an
-    displayMessage(5, 200, 310, 30, "192.168.4.1", ALIGNCENTER, true, ILI9341_GREEN, ILI9341_BLACK, 1);     // Zeige "IP " auf dem Display an
+    displayMessage(5, 10, 310, 30, i18n_str(I18N_NOT_CONNECTED), ALIGNCENTER, true, TFT_RED, TFT_BLACK, 1);    // Zeige "Nicht verbunden" auf dem Display an
+    displayMessage(5, 50, 310, 30, i18n_str(I18N_CONNECT_TO_AP), ALIGNCENTER, true, TFT_WHITE, TFT_BLACK, 1);  // Zeige "Verbinden zu AP" auf dem Display an
+    displayMessage(5, 100, 310, 30, AP_NAME, ALIGNCENTER, true, TFT_GREEN, TFT_BLACK, 1);           // Zeige "Ap Name" auf dem Display an
+    displayMessage(5, 150, 310, 30, i18n_str(I18N_CONFIG_IP), ALIGNCENTER, true, TFT_WHITE, TFT_BLACK, 1);     // Zeige "IP konfigurieren" auf dem Display an
+    displayMessage(5, 200, 310, 30, "192.168.4.1", ALIGNCENTER, true, TFT_GREEN, TFT_BLACK, 1);     // Zeige "IP " auf dem Display an
 
     // Merke den aktuellen Zeitstempel, um später nach 5 Minuten einen Retry zu ermöglichen
     discon = millis();
@@ -240,11 +253,14 @@ void setup() {
 }
 
 void loop() {
+  // NEU: Alarm-LED unabhängig vom Audiosystem als allererstes verarbeiten
+  handle_alarm_led();
+
   // Überprüfe und verarbeite mögliche OTA-Updates
   ArduinoOTA.handle();
 
-  /* Audio vor Webserver/LVGL: weniger Pufferunderruns bei gleichzeitigem WLAN-Traffic und UI. */
-  if (connected && (radio || decoder || alarmBeepActive)) {
+  /* KORREKTUR: 'decoder' entfernt. Audio vor Webserver/LVGL aufrufen */
+  if (connected && (radio || alarmBeepActive)) {
     audio_loop();
   }
 
@@ -260,8 +276,8 @@ void loop() {
     tft_i18n_refresh_labels();
   }
 
-  /* Nach LVGL: nochmal füttern — Screen-Wechsel kann lv_timer_handler länger blocken (Underruns/Knackser). */
-  if (connected && (radio || decoder || alarmBeepActive)) {
+  /* KORREKTUR: 'decoder' entfernt. Nach LVGL nochmal füttern */
+  if (connected && (radio || alarmBeepActive)) {
     audio_loop();
   }
 
@@ -282,7 +298,7 @@ void loop() {
     discon = millis();  // Merke den aktuellen Zeitstempel für einen automatischen Retry
     displayClear();     // Bildschirm löschen
     // Zeige eine Nachricht an, dass die Verbindung verloren gegangen ist
-    displayMessage(5, 10, 310, 30, i18n_str(I18N_NOT_CONNECTED), ALIGNCENTER, true, ILI9341_RED, ILI9341_BLACK, 1);
+    displayMessage(5, 10, 310, 30, i18n_str(I18N_NOT_CONNECTED), ALIGNCENTER, true, TFT_RED, TFT_BLACK, 1);
   }
 
   // Erkenne eine Wiederverbindung
@@ -291,13 +307,13 @@ void loop() {
     lastWeatherUpdate = 0;  // Wetter nach Reconnect zeitnah neu holen (nicht bis Intervall warten)
     displayClear();    // Bildschirm löschen
     // Zeige eine Nachricht an, dass die Verbindung wiederhergestellt wurde
-    displayMessage(5, 10, 310, 30, i18n_str(I18N_RECONNECTED), ALIGNCENTER, true, ILI9341_GREEN, ILI9341_BLACK, 1);
+    displayMessage(5, 10, 310, 30, i18n_str(I18N_RECONNECTED), ALIGNCENTER, true, TFT_GREEN, TFT_BLACK, 1);
     reconnected = true;
   }
 
   // Wenn die Helligkeit auf 0 gesetzt ist, wird die Helligkeit durch das Umgebungslicht gesteuert
   if (bright == 0) {
-    int16_t tmp = analogRead(LDR);  // Lese den Wert vom Lichtsensor (LDR)
+    int16_t tmp = analogRead(LDR);   // KORREKTUR: LDR ist fest an GPIO 34 verdrahtet
     int16_t diff = lastldr - tmp;   // Berechne die Differenz zum vorherigen Wert
     diff = abs(diff);               // Nehme den absoluten Wert der Differenz
 
@@ -347,11 +363,14 @@ void loop() {
       minutes = ti.tm_hour * 60 + ti.tm_min;  // Berechne Minuten seit Mitternacht
       weekday = ti.tm_wday;                   // Wochentag (0 = Sonntag, 1 = Montag, usw.)
     }
+
     // Datum/Uhrzeit-Update nur auf der Startseite
     if (connected && startpage) {
 
       if(!reconnected){
-        setBGLight(bright);  // Setze die Hintergrundbeleuchtung
+        if (!radio) {
+          setBGLight(bright);
+        }
         displayDateTime();   // Zeige Datum und Uhrzeit an ohne komplettes Display neu zu zeichnen
       }else{
         showStartPage();   // Zeige Datum und Uhrzeit mit komplett neu zu zeichnen
@@ -367,9 +386,21 @@ void loop() {
         alarmTriggered = true;  // verhindert mehrfaches Auslösen
         alarmActionsVisible = true;
         if (alarmWakeMode == 1) {
+          // Modus 1: Standardmäßig Piep/MP3 gewollt
           alarm_beep_start();
         } else {
-          toggleRadio(false, false, true);  // Radio an mit Wecklautstärke
+          // Modus 0: Radio gewollt -> HIER BAUEN WIR DAS SICHERHEITSNETZ EIN!
+          
+          if (connected && WiFi.status() == WL_CONNECTED) {
+            // WLAN ist da -> Versuche den Radiostream zu starten
+            toggleRadio(false, false, true); 
+          }
+          
+          // FALLBACK-TRIGGER: Wenn kein WLAN da ist ODER der Stream-Start fehlschlug
+          if (!radio) {
+            RADIO_SERIAL(Serial.println(F("WARNUNG: Radio-Wecken fehlgeschlagen (Kein WLAN/Stream). Starte SD-Fallback!")));
+            alarm_beep_start(); // Startet stattdessen sofort den lauten MP3-Sound von SD-Karte
+          }
         }
         showRadio();         // Zeige Radio-Informationen an
         findNextAlarm();     // Berechne den nächsten Alarm
@@ -379,9 +410,9 @@ void loop() {
   }
 
   // Reset-Flag, wenn Zeit weiterläuft und wir nicht mehr im Alarm-Minutenbereich sind
-if (minutes != alarmtime) {
-    alarmTriggered = false;
-}
+  if (minutes != alarmtime) {
+      alarmTriggered = false;
+  }
 
   // Starte einen Neustart, wenn das Gerät mehr als 5 Minuten getrennt war
   if (!connected && ((millis() - discon) > 300000)) ESP.restart();
@@ -433,5 +464,23 @@ static void alarm_hw_stop_button_action(void) {
     toggleRadio(true, false);
   } else {
     toggleRadio(false, false);
+  }
+}
+
+void handle_alarm_led() {
+  // Überprüft, ob entweder der Piep-Wecker (alarmBeepActive) 
+  // oder das Radio-Weck-Overlay (alarmActionsVisible) aktiv ist
+  if (alarmBeepActive || alarmActionsVisible) {
+    // Intervall: 500ms Gesamtzeit (250ms an / 250ms aus)
+    uint32_t blink_cycle = millis() % 500u;
+    
+    if (blink_cycle < 250u) {
+      digitalWrite(ALARM_LED, LOW);  // LED AN (Active-LOW!)
+    } else {
+      digitalWrite(ALARM_LED, HIGH); // LED AUS
+    }
+  } else {
+    // Wenn kein Alarm klingelt, bleibt die LED garantiert aus
+    digitalWrite(ALARM_LED, HIGH);
   }
 }

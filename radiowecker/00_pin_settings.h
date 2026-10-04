@@ -1,23 +1,27 @@
 // Pin-Definitionen für verschiedene Komponenten des Projekts
 
 // Pin für den Lichtsensor (LDR)
-#define LDR 36
+#define LDR 34
+
+// Pin für Alarm LED (Grüne LED)
+#define ALARM_LED 16
 
 // Audio-Pins
-#define LRCLK 25  // Left-Right Clock für die Audioausgabe
-#define BCLK 26   // Bit Clock für die Audioausgabe
-#define DOUT 33   // Daten-Ausgang für die Audioausgabe
+#define AMP_SHUTDOWN 27  // Amplifier IC SHUTDOWN Pin
+#define INT_DAC_OUT 26
 
 // Pins für den Touchscreen
-#define TOUCH_CS 14   // Chip Select für den Touchscreen
-#define TOUCH_IRQ 27  // Interrupt-Anschluss für den Touchscreen
+#define TOUCH_MOSI 32
+#define TOUCH_MISO 39
+#define TOUCH_CLK  25
+#define TOUCH_CS   33
 
 // Pins für das TFT-Display
-#define TFT_CS 5    // Chip Select für das TFT-Display
-#define TFT_DC 4    // Data/Command Pin für das TFT-Display
-#define TFT_RST 22  // Reset-Pin für das TFT-Display
-#define TFT_LED 15  // Hintergrundbeleuchtung des TFT-Displays
-#define LED_ON 0    // Logikpegel für die Hintergrundbeleuchtung (0 = Ein)
+#define TFT_LED 21  // Hintergrundbeleuchtung des TFT-Displays
+#define LED_ON 1    // Logikpegel für die Hintergrundbeleuchtung (0 = Ein)
+
+// Pins für SD Slot
+#define SD_CS  5
 
 /* LDR-Modus (Helligkeit 0 %): Mindest-PWM 0–255 nach Umrechnung vom ADC.
    Verhindert komplett ausgeschaltete Backlight (Slider/Stop → sonst oft unbedienbar). */
@@ -28,7 +32,7 @@
 /* LDR-Modus: Anteil des neuen Messwerts am Soll-PWM (1/DIV). Größer DIV = weicher, langsamer.
    Beim Wechsel feste % → LDR startet von der zuletzt geschriebenen Backlight (kein Sprung). */
 #ifndef LDR_PWM_SMOOTH_DIV
-#define LDR_PWM_SMOOTH_DIV 2  //4
+#define LDR_PWM_SMOOTH_DIV 1  //2
 #endif
 
 /* Optionale Hardware-Tasten (nach GND, INPUT_PULLUP): Pin < 0 = aus / nicht angeschlossen (Default).

@@ -15,6 +15,16 @@ Was sich gegenüber den **älteren Releases** (z. B. der **4.x-Linie** wie [v4.0
 
 ---
 
+## Änderungen für Cheap Yellow Display (CYD) 2.8":
+
+* Verwendung des internen DAC
+* Verwendung einer beliebigen MP3 als Piepton über SD-Karte
+* Verwendung der TFT-eSPI library
+* Verwendung der XPT2046_Bitbang library
+* Sketch ist so groß, dass die Partitionen angepasst werden mussten und ein OTA Update nicht mehr möglich ist
+
+---
+
 ## Änderungen gegenüber der Version 4.x
 
 Die Vorgängerversionen nutzten überwiegend **direktes Zeichnen** mit **Adafruit GFX** auf dem ILI9341 sowie die Bibliothek **TouchEvent** zur Touch-Auswertung. **Ab der 5.x-Linie** (aktueller Stand **v5.0.6**) ersetzt **LVGL 9** die **Hauptoberfläche** (Widgets, Themes, Animationen). Darunter liegt weiterhin derselbe **ILI9341**-Treiber: LVGL schreibt in einen Puffer, der auf das TFT gezeichnet wird; für wenige Zustände (z. B. WLAN-Verbindungsdialog vor dem Start von LVGL) werden weiterhin **Adafruit_ILI9341**-Aufrufe genutzt.
@@ -36,13 +46,7 @@ Wenn du von einem **älteren Stand** migrierst: Sketch komplett ersetzen, Biblio
 
 | Komponente | Hinweis |
 |------------|---------|
-| **ESP32** | z. B. DevKit wie beim AZ-Touch-Set |
-| **Display** | ILI9341, 2,8" (beim AZ-Touch MOD integriert) |
-| **Touch** | XPT2046 (beim AZ-Touch MOD) |
-| **Audio** | I2S-Verstärker (z. B. MAX98357A) + Lautsprecher |
-| **Optional** | LDR (Helligkeit) laut `00_pin_settings.h` |
-
-**Pinbelegung** für Display, Touch, I2S und LDR: Datei **`radiowecker/00_pin_settings.h`**. Abweichende Boards: Pins dort anpassen.
+|**CYD ESP32**|z.B. `https://www.amazon.de/dp/B0FF4DTNCG?ref=ppx_yo2ov_dt_b_fed_asin_title&th=1`|
 
 ---
 
@@ -60,15 +64,11 @@ Wenn du von einem **älteren Stand** migrierst: Sketch komplett ersetzen, Biblio
 
 1. Gehe zu `Werkzeuge` > `Board` > `Boardverwalter`.
 2. Suche nach **ESP32** im Suchfeld.
-3. Wähle **ESP32 by Espressif Systems** aus und klicke auf **Installieren**.
+3. Wähle **esp32 by Espressif Systems** aus und klicke auf **Installieren**.
 
-> [!IMPORTANT]  
-> **Hinweis:** Stelle sicher, dass du je nach radiowecker Version die richtige **Version 2.0.17 oder > 3.0** auswählst, da es zu Problemen kommen kann.~~
-
-|Radio Version|Boardverwalter|Partition|
-| ------------- | ------------- | ------------- |
-|<= 4.0.3|2.0.17|default|
-|>= 5.x|3.3.7|No FS 4MB|
+|Boardverwalter Version|Partition|
+| ------------- | ------------- |
+|2.0.17|Huge APP|
 
 ### Bibliotheken (Referenzstände für v5.0.6)
 
@@ -76,18 +76,15 @@ Wenn du von einem **älteren Stand** migrierst: Sketch komplett ersetzen, Biblio
 2. Suche nach **Bibliothek Name**.
 3. Wähle die **Version xxx** aus dem Dropdown-Menü und klicke auf **Installieren**.
 
-> [!IMPORTANT]  
-> **Hinweis:** Stelle sicher, dass du je nach radiowecker Version die richtige **Version** auswählst, da es zu Problemen kommen kann.~~
+> \\\[!IMPORTANT]  
+> \\\*\\\*Hinweis:\\\*\\\* Stelle sicher, dass du je nach radiowecker Version die richtige \\\*\\\*Version\\\*\\\* auswählst, da es zu Problemen kommen kann.\\\~\\\~
 
-| Bibliothek |Radio Version <= v4.0.3 |Radio Version >= v5.x |
-|------------|-----------|--------|
-| Adafruit_ILI9341 | 1.6.2 | 1.6.3 |
-| Adafruit_GFX | 1.12.1 | 1.12.5 |
-| XPT2046_Touchscreen | 1.4 | 1.4 |
-| ESP8266Audio by Earle F. Philhower | 2.0.0 | 2.4.1 |
-| Touchevent by Gerald-Lechner | 1.3.0 | :x: |
-| lvgl | :x: | 9.5.0 |
-
+|Bibliothek|Version|
+|------------|-----------|
+|TFT-eSPI by Bodmer|2.5.43|
+|XPT2046_Bitbang_Slim by Claus Näveke|2.0.1|
+|ESP32-audioI2S-master by schreibfaul1|3.0.0|
+|lvgl|9.5.0|
 ---
 
 ## Board-Einstellungen in der Arduino IDE
@@ -98,12 +95,11 @@ Unter **Werkzeuge** u. a.:
 |-------------|------------|
 | **Board** | *ESP32 Dev Module* (oder passend zu deinem Modul) |
 | **Flash Size** | *4 MB* (wenn dein Chip 4 MB hat) |
-| **Partition Scheme** | **No FS 4MB** |
+| **Partition Scheme** | **Huge APP** |
 
-**Warum „No FS 4MB“?**  
+**Warum „Huge APP“?**  
 LVGL 9, Webserver, Audio und Einstellungen benötigen eine **große App-Partition**. Schemata mit großem SPIFFS/LittleFS lassen oft zu wenig Flash für den Sketch übrig und führen zu Link- oder Laufzeitproblemen.
 
-- **PSRAM:** nur *Enabled*, wenn dein Board **physikalisch PSRAM** hat.  
 - Nach Wechsel des Partitionsschemas ggf. einmal **„Erase All Flash Before Sketch Upload“** aktivieren und neu flashen.
 
 ---
@@ -126,13 +122,53 @@ Die **Uhrzeit-Schrift** (`lv_font_clock_digits.c`) liegt im Sketch-Ordner;
 
 **Wichtig:** Änderst du `lv_conf.h` im Projekt, die Kopie unter `libraries/lvgl/src/` **immer wieder mitüberschreiben**, sonst kompiliert die Library mit alter Konfiguration (fehlende Fonts/Features).
 
+## TFT_eSPI: Pflichtschritt `User_Setup.h`
+
+Die `User_Setup.h` Datei im Library-Pfad muss wie folgt angepasst werden:
+
+```
+// ============================================================================
+// TFT_eSPI KONFIGURATION FÜR ESP32-2432S028 (CYD)
+// ============================================================================
+#ifndef USER_SETUP_LOADED
+#define USER_SETUP_LOADED 1 // WICHTIG: Sagt TFT_eSPI, dass diese Datei geladen werden MUSS
+#endif
+
+#define ILI9341_2_DRIVER // Falls bunte Streifen bleiben, stattdessen probieren: #define ST7789_DRIVER
+
+#define TFT_MISO 12
+#define TFT_MOSI 13
+#define TFT_SCLK 14
+#define TFT_CS   15
+#define TFT_DC    2
+#define TFT_RST  -1  // Hardware-Reset ist auf dem Board autark
+
+// Touchscreen-Verkabelung (Aktiviert den zweiten SPI-Bus automatisch intern!)
+//#define TOUCH_CS 33
+
+#define LOAD_GLCD   1
+#define LOAD_FONT2  1
+#define LOAD_FONT4  1
+#define LOAD_FONT6  1
+#define LOAD_FONT7  1
+#define LOAD_FONT8  1
+#define LOAD_GFXFF  1
+
+#define SPI_FREQUENCY  55000000  // STM32 SPI1 only (SPI2 maximum is 27MHz)
+#define SPI_READ_FREQUENCY  20000000
+#define SPI_TOUCH_FREQUENCY  2500000 // Sichere 2MHz für störungsfreien Audio-Task
+
+#define USE_HSPI_PORT
+```
+
 ### Kurz-Checkliste vor dem ersten Upload
 
-1. ESP32-Boardsupport installiert, Board & **No FS 4MB** eingestellt.  
+1. ESP32-Boardsupport installiert, Board & **Huge APP** eingestellt.  
 2. Bibliotheken laut Tabelle installiert.  
-3. `lv_conf.h` nach `libraries/lvgl/src/lv_conf.h` kopiert.  
-4. Sketch-Ordner `radiowecker/` vollständig geöffnet.  
-5. Kompilieren; bei Fehlern zu Montserrat/LVGL zuerst **`lvgl/src/lv_conf.h`** prüfen.
+3. `lv_conf.h` nach `libraries/lvgl/src/lv_conf.h` kopiert.
+4. `User_Setup.h` in TFT_eSPI library gemäß Readme angepasst.  
+5. Sketch-Ordner `radiowecker/` vollständig geöffnet.  
+6. Kompilieren; bei Fehlern zu Montserrat/LVGL zuerst **`lvgl/src/lv_conf.h`** prüfen.
 
 ---
 
@@ -296,4 +332,3 @@ SVG-Übersichten zu den Masken: **`DOKU/Main_Screen_Raster.svg`**, **`DOKU/Confi
 ---
 
 **Radiowecker · Version 5.0.6**
-

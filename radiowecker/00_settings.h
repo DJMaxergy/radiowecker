@@ -13,9 +13,8 @@ typedef struct {
 #define STATIONS 30           // Anzahl der Stationen in der Liste
 #define MINUTES_PER_DAY 1440  // Anzahl der Minuten in einem Tag (24 Stunden * 60 Minuten)
 
-/* ESP8266Audio SetGain 0..4 — effektiver Maximalwert bei Slider 100 % (z. B. 0.35–0.5) */
 #ifndef AUDIO_GAIN_MAX
-#define AUDIO_GAIN_MAX 0.42f
+#define AUDIO_GAIN_MAX 21
 #endif
 
 /**
@@ -122,6 +121,6 @@ bool alarmTriggered = false;
 unsigned long lastWeatherUpdate = 0;
 const unsigned long weatherUpdateInterval = 60000;  // 60 Sekunden
 // Definiere Latitude, Longitude und Zeitzone
-float LATITUDE = 52.520645;
-float LONGITUDE = 13.409779;
+float LATITUDE = 49.426920;
+float LONGITUDE = 11.358430;
 char TIME_ZONE_IANA[CFG_TZ_IANA_MAX] = "Europe/Berlin";
