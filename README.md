@@ -23,6 +23,11 @@ Was sich gegenüber den **älteren Releases** (z. B. der **4.x-Linie** wie [v4.0
 * Verwendung der XPT2046_Bitbang library
 * Sketch ist so groß, dass die Partitionen angepasst werden mussten und ein OTA Update nicht mehr möglich ist
 
+### Hilfreiche Links:
+* <https://mischianti.org/esp32-2432s028-cheap-yellow-display-high-resolution-pinout-datasheet-schema-and-specs/>
+* <https://github.com/hexeguitar/ESP32_TFT_PIO/tree/main>
+* <https://cool-web.de/esp8266-esp32/esp32-2432s028-cheap-yellow-display-cyd-touchscreen-platformio-tft-espi-xpt2046-lvgl-dc-utilities-v4-web-radio.htm>
+
 ---
 
 ## Änderungen gegenüber der Version 4.x
